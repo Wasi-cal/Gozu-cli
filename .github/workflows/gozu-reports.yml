@@ -94,9 +94,9 @@ jobs:
           path: reports/trivy-dependency-reports
       - uses: Wasi-cal/Gozu-Action@v1.4.1
         with:
-          jira-url: ${{ secrets.JIRA_URL }}
+          jira-url: https://gozu-calfus.atlassian.net
           jira-email: ${{ secrets.JIRA_EMAIL }}
           jira-api-token: ${{ secrets.JIRA_API_TOKEN }}
-          jira-project-key: ${{ secrets.JIRA_PROJECT_KEY }}
+          jira-project-key: VT
           semgrep-report: reports/semgrep-report/semgrep-report.json
           trivy-report: reports/trivy-dependency-reports/trivy-report.json
