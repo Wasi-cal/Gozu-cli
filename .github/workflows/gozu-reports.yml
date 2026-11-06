@@ -1,0 +1,102 @@
+# Copyright (c) 2026 Calfus Inc.
+# Author: Wasiullah Rafeeq S
+
+# Test of report mode of Gozu, laid out like the shared pipeline of mvue-ai-workflows: a Semgrep job and a Trivy job
+# each upload their own report artifact. The last job downloads both and gives them to Gozu, which makes the Jira
+# tickets and runs no scanner of its own.
+name: gozu-reports
+
+on:
+  workflow_dispatch:
+  pull_request:
+    types: [opened, reopened, synchronize]
+  # Never use pull_request_target. A run on a fork pull request must not get secrets.
+
+concurrency:
+  group: gozu-reports-${{ github.repository }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  # The artifact is semgrep-report, with semgrep-report.json in it, as in semgrep-scan-and-comment.
+  semgrep:
+    name: Semgrep Scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      # No --error, so findings do not fail the job. Only a scan that breaks does.
+      - name: Run Semgrep scan
+        run: |
+          python3 -m venv "$RUNNER_TEMP/venv"
+          "$RUNNER_TEMP/venv/bin/pip" install --quiet semgrep==1.176.0
+          "$RUNNER_TEMP/venv/bin/semgrep" scan \
+            --config p/dockerfile --config p/cwe-top-25 --config p/owasp-top-ten --config p/r2c-security-audit \
+            --config p/secure-defaults --config p/secrets --config p/python \
+            --exclude-rule yaml.github-actions.security.github-actions-mutable-action-tag.github-actions-mutable-action-tag \
+            --metrics off --json --output semgrep-report.json .
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: always()
+        with:
+          name: semgrep-report
+          path: semgrep-report.json
+          if-no-files-found: error
+
+  # The artifact is trivy-dependency-reports. It holds the table and the JSON report that Gozu reads.
+  # The scan covers every severity, and the unfixed CVEs are left out as in trivy-scan-and-comment.
+  trivy:
+    name: Trivy dependency scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - uses: aquasecurity/setup-trivy@81e514348e19b6112ce2a7e3ecbafe19c1e1f567 # v0.3.1
+        with:
+          version: v0.76.1
+          cache: true
+      - name: Trivy filesystem scan
+        run: |
+          trivy fs --scanners vuln --ignore-unfixed --severity UNKNOWN,LOW,MEDIUM,HIGH,CRITICAL \
+            --format json --output trivy-report.json .
+          trivy convert --format table --output trivy-report.txt trivy-report.json
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: always()
+        with:
+          name: trivy-dependency-reports
+          path: |
+            trivy-report.txt
+            trivy-report.json
+          if-no-files-found: error
+
+  gozu:
+    name: Gozu
+    needs: [semgrep, trivy]
+    # A scan job that fails its gate must not stop Gozu, so the reports it uploaded are still read.
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-latest
+    steps:
+      # Gozu reads the flagged lines from this checkout for the code snippet of a ticket.
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: semgrep-report
+          path: reports/semgrep-report
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: trivy-dependency-reports
+          path: reports/trivy-dependency-reports
+      - uses: Wasi-cal/Gozu-Action@v1.4.1
+        with:
+          jira-url: https://gozu-calfus.atlassian.net
+          jira-email: ${{ secrets.JIRA_EMAIL }}
+          jira-api-token: ${{ secrets.JIRA_API_TOKEN }}
+          jira-project-key: VT
+          semgrep-report: reports/semgrep-report/semgrep-report.json
+          trivy-report: reports/trivy-dependency-reports/trivy-report.json
